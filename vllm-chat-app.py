@@ -59,11 +59,19 @@ def web_search(q: str, n: int = 3) -> str:
     except Exception:
         return ""
 
-def save_conv(cid: str, msgs: List[Dict[str, str]]):
-    with (HROOT / f"{cid}.jsonl").open("w", encoding="utf-8") as f:
+def save_conv(cid: str, msgs: List[Dict[str, str]], title: str) -> None:
+    """
+    先頭行に ``role=meta`` を置き、以降に通常メッセージを jsonl で保存する。
+    """
+    path = HROOT / f"{cid}.jsonl"
+    with path.open("w", encoding="utf-8") as f:
+        meta = {"role": "meta", "title": title,
+                "ts": datetime.utcnow().isoformat()}
+        json.dump(meta, f, ensure_ascii=False)
+        f.write("\n")
         for m in msgs:
-            json.dump({"ts": datetime.utcnow().isoformat(), **m}, f,
-                      ensure_ascii=False)
+            json.dump({"ts": datetime.utcnow().isoformat(), **m},
+                      f, ensure_ascii=False)
             f.write("\n")
 
 def choice(conv: dict) -> tuple[str, str]:
@@ -150,7 +158,8 @@ class VllmChatSession:
             self._cancel.clear()
 
     async def summarize_title(self) -> str:
-        if len(self.messages) < 2: return ""
+        if len(self.messages) < 2:
+            return ""
         prompt = self._tok.apply_chat_template(
             self.messages + [{"role":"system",
                                "content":"上の会話を5~10文字で要約してください。"}],
@@ -171,10 +180,32 @@ def build_ui(model_name: str, max_tokens: int, history_root: str):
     HROOT = Path(history_root)
     HROOT.mkdir(exist_ok=True)
 
-    init_id = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-    convs: List[Dict[str, Any]] = [
-        {"id": init_id, "title": "新規チャット", "session": VllmChatSession()}
-    ]
+    # 既存 *.jsonl を読み込み
+    convs: List[Dict[str, Any]] = []
+    for path in HROOT.glob("*.jsonl"):
+        cid = path.stem
+        sess = VllmChatSession()
+        title = "(untitled)"
+        try:
+            with path.open(encoding="utf-8") as f:
+                # 1 行目 = メタ
+                meta = json.loads(f.readline())
+                title = meta.get("title", title)
+                # 残り行 = 発話
+                for line in f:
+                    rec = json.loads(line)
+                    sess.messages.append(
+                        {"role": rec["role"], "content": rec["content"]})
+        except Exception:
+            pass
+        convs.append({"id": cid, "title": title, "session": sess})
+
+    # 履歴が無い場合は空の新規チャットを 1 つ作成
+    if not convs:
+        init_id = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        convs.append({"id": init_id, "title": "新規チャット",
+                      "session": VllmChatSession()})
+        save_conv(init_id, [], "新規チャット")
 
     with gr.Blocks(css="""
         /* 全要素に一律で18pxを適用 */
@@ -226,6 +257,7 @@ def build_ui(model_name: str, max_tokens: int, history_root: str):
             cid = datetime.utcnow().strftime("%Y%m%d%H%M%S")
             st.value.append({"id": cid, "title":"新規チャット",
                              "session": VllmChatSession()})
+            save_conv(cid, [], "新規チャット")
             ch = [choice(c) for c in st.value]
             return gr.update(choices=ch, value=cid), "", []
 
@@ -233,9 +265,12 @@ def build_ui(model_name: str, max_tokens: int, history_root: str):
             if not st.value:
                 return gr.update(), [], ""
             st.value = [c for c in st.value if c["id"] != cid]
-            try: (HROOT/f"{cid}.jsonl").unlink(missing_ok=True)
-            except: pass
-            if not st.value: new_chat()
+            try:
+                (HROOT/f"{cid}.jsonl").unlink(missing_ok=True)
+            except:
+                pass
+            if not st.value:
+                new_chat()
             ch = [choice(c) for c in st.value]
             first = st.value[0]
             return gr.update(choices=ch, value=first["id"]), \
@@ -257,6 +292,7 @@ def build_ui(model_name: str, max_tokens: int, history_root: str):
 
             yield sess.messages, "", gr.update()
 
+            # タイトル確定
             if conv["title"] == "新規チャット":
                 title = await sess.summarize_title()
                 if title:
@@ -264,7 +300,8 @@ def build_ui(model_name: str, max_tokens: int, history_root: str):
                     ch = [choice(c) for c in st.value]
                     yield sess.messages, "", \
                           gr.update(choices=ch, value=cid)
-            save_conv(cid, sess.messages)
+            # 毎ターン保存
+            save_conv(cid, sess.messages, conv["title"])
 
         # ─ wire events ─
         radio.change(load, inputs=radio, outputs=bot)
