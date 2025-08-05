@@ -200,12 +200,16 @@ def build_ui(model_name: str, max_tokens: int, history_root: str):
             pass
         convs.append({"id": cid, "title": title, "session": sess})
 
-    # 履歴が無い場合は空の新規チャットを 1 つ作成
-    if not convs:
-        init_id = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    # ─ 初期選択肢とデフォルト値を決定 ─
+    if convs:
+        init_id = convs[0]["id"]          # 既存履歴がある
+    else:
+        init_id = datetime.utcnow().strftime("%Y%m%d%H%M%S")   # 新規
         convs.append({"id": init_id, "title": "新規チャット",
                       "session": VllmChatSession()})
         save_conv(init_id, [], "新規チャット")
+
+    radio_choices = [choice(c) for c in convs]
 
     with gr.Blocks(css="""
         /* 全要素に一律で18pxを適用 */
@@ -229,7 +233,7 @@ def build_ui(model_name: str, max_tokens: int, history_root: str):
 
                 radio = gr.Radio(
                     label="会話履歴",
-                    choices=[("新規チャット", init_id)],   # (label, value)
+                    choices=radio_choices,
                     value=init_id,
                     interactive=True,
                 )
